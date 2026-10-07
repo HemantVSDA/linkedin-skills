@@ -17,3 +17,7 @@ testing/
 # Playwright MCP session artifacts
 .playwright-mcp/
 /fk-*
+references/voice-profile.md
+references/story-bank.md
+# Generated images (client work; never committed)
+output/

@@ -34,10 +34,15 @@ otherwise.
 
 ## Commits
 
-- Primary author **must** be Sergey: every `git commit` needs
-  `--author="Sergey Bulaev <s@bulaev.org>"`. The harness defaults to the
-  Claude identity if you forget; verify with
+- This is AccountIF's fork (`origin` = HemantVSDA/linkedin-skills, `upstream`
+  = sergebulaev/linkedin-skills). Commits here are authored by the AccountIF
+  maintainer (the repo-local `git config user.name/email`), not by Sergey;
+  his history stays intact. Upstream PRs, if any, follow his rule:
+  `--author="Sergey Bulaev <s@bulaev.org>"`. Verify with
   `git log -1 --format='%an <%ae>'` before pushing.
+- Never commit `.env`, `testing/`, `output/`, or a filled
+  `references/voice-profile.md` / `references/story-bank.md`: the AccountIF
+  versions are shared privately (see SETUP-TEAM.md).
 - Co-author trailer (`Co-Authored-By: Claude ...`) is fine and welcomed.
 - Verify locally before push: build never breaks, no broken refs in
   `SKILL.md`, library smoke import passes.
@@ -128,6 +133,18 @@ otherwise.
   `aspect_ratio` must be a ratio like `16:9` (NOT pixel dims). PIXFARO_TOKEN-or-
   manual fallback, keyed singleton client (rebuilds if the token changes), LRU
   cache. `overlay` brand fields come from `references/voice-profile.md` §6.
+- **Image layer, Google edition (this fork's default):** `lib/gemini_client.py`
+  (Gemini `generateContent`, stateless, images saved to gitignored `output/`),
+  `lib/brand_compose.py` (Pillow: logo overlay, typeset `text_card` /
+  `quote_card`, brand from `BRAND_*` env vars) and `lib/text_check.py` (local
+  OCR via `rapidocr-onnxruntime` that verifies model-drawn text). `GEMINI_API_KEY`
+  wins over `PIXFARO_TOKEN` in `image_backend()`. Same skill-facing calls
+  (`illustrate`, `refine`, `quote_card`, `card`) plus `lib.designed(...)` (route
+  A: AI-designed + OCR check + typeset fallback) and `lib.text_card(...)` (routes
+  B/C). Results carry a local file path as `url`; `lib.publish` uploads local
+  files via Publora `POST /get-upload-url` + PUT, then `PUT /update-post`.
+  Model-drawn numbers never ship unverified. Pixfaro code stays for upstream
+  compatibility.
 - **Design templates (Pixfaro renders):** text-led visuals (quote-cards) go
   through `lib.quote_card(quote, ...)` / `lib.card(template, slots, ...)`
   (or `lib.available_templates()`), never through `illustrate` — the card is
@@ -138,7 +155,9 @@ otherwise.
   `overlay` — record it in `references/voice-profile.md` §6.
 - Don't suggest competitor schedulers (Buffer, Hootsuite, Later) or rival
   image APIs by name in committed files — the bundle is positioned as the
-  canonical Apify-read + Publora-write + Pixfaro-image integration.
+  canonical Apify-read + Publora-write + Pixfaro-image integration. Exception
+  in this fork: Google Gemini is the chosen image backend (owner's decision,
+  2026-10-07), so it is named where it is configured and documented.
 
 ## Codex marketplace package
 

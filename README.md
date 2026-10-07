@@ -4,6 +4,8 @@
 
 # LinkedIn Marketing Skills for Claude Code and Codex
 
+> **AccountIF team:** this is AccountIF's edition (Google Gemini images, AccountIF brand). Setup for your laptop and Claude Desktop: **[SETUP-TEAM.md](SETUP-TEAM.md)**. Forked from [sergebulaev/linkedin-skills](https://github.com/sergebulaev/linkedin-skills) (MIT).
+
 <p align="center">
   <img src="https://img.shields.io/github/v/release/sergebulaev/linkedin-skills?color=1E40AF&label=release" alt="Latest release">
   <img src="https://img.shields.io/badge/Claude_Code-Compatible-D97757?logo=anthropic&logoColor=white" alt="Claude Code Compatible">
@@ -269,6 +271,16 @@ Posts with a visual get more dwell time. The Post Writer can generate an illustr
 Setup: sign up at [api.pixfaro.com/signup](https://api.pixfaro.com/signup?ref=linkedin-skills), create a key (name it `linkedin`, scope **Generate**), and put `PIXFARO_TOKEN=pf_live_...` in `.env` **at the root of the `linkedin-skills` folder** (next to this README; keys are shown once). Then `python3 scripts/check_config.py` calls Pixfaro's `GET /v1/key` and prints the key's name and scope when it is right. The thin client at `lib/pixfaro_client.py` and the wrappers `lib.illustrate(prompt, kind=...)` / `lib.refine(image_id, instruction)` return a hosted URL that flows straight into `lib.publish(..., media_urls=[url])`. `refine` edits a prior image by its id (cheaper than regenerating); results carry `cost`, `balance_after`, and a `premium` flag so the skills never quietly spend on a pricey model.
 
 For **text-led visuals** (a quote-card of your hook), the skills skip the image model entirely and use Pixfaro's design templates: `lib.quote_card("<hook>", handle="@you", style="brand")` typesets the card server-side (`POST /v1/renders`), so the line is crisp at any length — same hosted-URL flow. `lib.available_templates()` lists templates and live prices. A brand logo can be uploaded once with `lib.brand_logo("logo.png")` (full-scope key); the returned `logo_id` goes into Voice & Brand Profile §6 and every overlay from then on stamps the real mark.
+
+## Optional: generate images with Google Gemini
+
+Put a [Google AI Studio](https://aistudio.google.com/api-keys) key in `.env` as `GEMINI_API_KEY=...` (link billing to its project: image models have no free tier) and the image layer switches to Google, ahead of Pixfaro if both are set. Then `pip install -r requirements.txt` for the local brand layer.
+
+- **Three ways to put text on a visual.** `lib.designed(headline, items)` has Gemini design the whole graphic, then a local OCR check verifies every planned word and number; a miss gets a targeted fix, and anything still wrong is rebuilt as typed text. `lib.text_card(headline, items, scene=...)` puts typed text over a wordless Gemini picture. `lib.quote_card("<hook>")` is a fully typed card at no cost.
+- **Your brand on every image.** Logo, colours and handle come from `BRAND_*` lines in `.env` (see `.env.example`) and are stamped locally, pixel-exact. Default shape is 4:5 portrait, the best-performing single-image format on LinkedIn.
+- **Publishing.** Images are saved to `output/` (gitignored) and uploaded through Publora on approval. Default model `gemini-nano-banana-2.1` at about $0.034 per image; the Pro model only when you ask.
+
+`python3 scripts/check_config.py` verifies the key, the logo path, Pillow and the OCR engine.
 
 ## Voice rules
 

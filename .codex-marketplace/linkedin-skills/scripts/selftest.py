@@ -92,7 +92,7 @@ def phase_install(root: pathlib.Path) -> Phase:
     promised = None
     if manifest.is_file():
         import re
-        match = re.match(r"\s*(\d+)\b", json.loads(manifest.read_text()).get("description", ""))
+        match = re.match(r"\s*(\d+)\b", json.loads(manifest.read_text(encoding="utf-8")).get("description", ""))
         promised = int(match.group(1)) if match else None
     phase.add(PASS if promised in (None, len(skills)) else FAIL, "skills present",
               f"{len(skills)} loadable" + (f", manifest promises {promised}" if promised else ""))
@@ -141,7 +141,7 @@ def probe(url, headers, timeout=30):
 
 def phase_accounts(offline: bool) -> tuple[Phase, dict]:
     phase = Phase("Accounts")
-    live = {"apify": False, "publora": False, "pixfaro": False}
+    live = {"apify": False, "publora": False, "pixfaro": False, "google": False, "images": False}
 
     sys.path.insert(0, str(ROOT))
     from lib._env import load_env
@@ -233,6 +233,25 @@ def phase_accounts(offline: bool) -> tuple[Phase, dict]:
                 phase.add(WARN, "  Pixfaro email", "unverified; generation stays blocked")
         else:
             phase.add(FAIL, "Pixfaro", f"token rejected (HTTP {status}); keys are shown once")
+
+    # --- Google (Gemini): images, preferred over Pixfaro when both are set.
+    # GET /models is free and proves the key; billing shows only on a generation.
+    gkey = (os.getenv("GEMINI_API_KEY") or "").strip()
+    if not gkey:
+        phase.add(SKIP, "Google images", "no GEMINI_API_KEY")
+    elif offline:
+        phase.add(PASS, "Google images", "key present, not verified offline")
+    else:
+        status, r = probe("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000",
+                          {"x-goog-api-key": gkey})
+        if status == 200:
+            names = [m["name"].split("/", 1)[-1] for m in r.json().get("models", [])]
+            images = [n for n in names if "image" in n or "banana" in n]
+            phase.add(PASS, "Google images", f"key valid, {len(images)} image models; billing needed for images")
+            live["google"] = True
+        else:
+            phase.add(FAIL, "Google images", f"key rejected (HTTP {status})")
+    live["images"] = live["pixfaro"] or live["google"]
     return phase, live
 
 
@@ -277,7 +296,7 @@ NEEDS = {
     "linkedin-hook-extractor":    ("apify",),
     "linkedin-humanizer":         (),
     "linkedin-interviewer":       (),
-    "linkedin-post-writer":       ("publora", "pixfaro"),
+    "linkedin-post-writer":       ("publora", "images"),
     "linkedin-profile-optimizer": (),
     "linkedin-reply-handler":     ("apify", "publora"),
     "linkedin-repurposer":        ("publora",),
@@ -365,6 +384,19 @@ def phase_live(live: dict, assume_yes: bool) -> Phase:
         except Exception as exc:
             phase.add(FAIL, "Pixfaro render", f"{type(exc).__name__}: {str(exc)[:60]}")
 
+    if live["google"]:
+        # The typeset quote-card is local and free: it exercises the brand layer
+        # and gives the Publora step below a local file to upload.
+        try:
+            from lib import quote_card
+
+            card = quote_card("Every limit you send an actor is ignored unless it is the "
+                              "key the actor declares.")
+            phase.add(PASS if card.get("path") else FAIL, "Google brand layer",
+                      f"typeset quote-card, $0, {os.path.basename(card.get('path') or '?')}")
+        except Exception as exc:
+            phase.add(FAIL, "Google brand layer", f"{type(exc).__name__}: {str(exc)[:60]}")
+
     if live["publora"]:
         # Create a draft, read it back, delete it. A draft has no scheduled time,
         # so nothing is queued and nothing reaches anyone's feed. This is the
@@ -374,7 +406,9 @@ def phase_live(live: dict, assume_yes: bool) -> Phase:
         client, group = PubloraClient(), None
         # Reuse the card rendered above, so the draft also exercises the handover
         # Pixfaro -> media_urls -> Publora, which nothing else covers.
-        media_url = locals().get("card", {}).get("url") if live["pixfaro"] else None
+        card_url = locals().get("card", {}).get("url") if live["images"] else None
+        media_url = card_url if card_url and card_url.startswith("http") else None
+        local_file = card_url if card_url and not media_url else None
         try:
             created = client.create_post(
                 content="linkedin-skills selftest draft. Not scheduled, deleted immediately.",
@@ -385,6 +419,12 @@ def phase_live(live: dict, assume_yes: bool) -> Phase:
             group = created.get("postGroupId")
             phase.add(PASS if group else FAIL, "Publora draft created",
                       f"postGroupId {group}" if group else f"no id back: {sorted(created)}")
+            if group and local_file:
+                # Local images (Google backend) go through get-upload-url + PUT.
+                slot = client.upload_file(path=local_file, post_group_id=group)
+                phase.add(PASS if slot.get("fileUrl") else FAIL, "Publora image upload",
+                          "local card uploaded into the draft" if slot.get("fileUrl")
+                          else f"no fileUrl back: {sorted(slot)}")
         except (PubloraError, KeyError) as exc:
             phase.add(FAIL, "Publora draft created", f"{type(exc).__name__}: {str(exc)[:60]}")
 

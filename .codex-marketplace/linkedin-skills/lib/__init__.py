@@ -27,6 +27,8 @@ from .backend_selector import (
     quote_card,
     available_templates,
     brand_logo,
+    text_card,
+    designed,
 )
 
 # The three HTTP clients import `requests`, which manual-tier users are not
@@ -39,6 +41,8 @@ _LAZY_CLIENTS = {
     "ApifyError": "apify_client",
     "PixfaroClient": "pixfaro_client",
     "PixfaroError": "pixfaro_client",
+    "GeminiImageClient": "gemini_client",
+    "GeminiError": "gemini_client",
 }
 
 
@@ -61,6 +65,8 @@ __all__ = [
     "ApifyError",
     "PixfaroClient",
     "PixfaroError",
+    "GeminiImageClient",
+    "GeminiError",
     "render_approval_card",
     "active_backend",
     "image_backend",
@@ -77,4 +83,6 @@ __all__ = [
     "quote_card",
     "available_templates",
     "brand_logo",
+    "text_card",
+    "designed",
 ]

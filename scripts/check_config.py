@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnose the optional credential layers (Apify, Publora, Pixfaro).
+"""Diagnose the optional credential layers (Apify, Publora, Pixfaro, Gemini).
 
 Every layer is optional: the bundle drafts fine with nothing configured, so an
 unconfigured layer is reported as a plain status, never a failure. What this
@@ -229,6 +229,8 @@ def check_pixfaro(report: Report, offline: bool) -> None:
         unloaded = find_unloaded_token_file()
         if unloaded:
             report.add(BAD, "PIXFARO_TOKEN", f"defined in {unloaded} but NOT loaded - install python-dotenv (pip install python-dotenv) or run from the linkedin-skills folder")
+        elif os.getenv("GEMINI_API_KEY"):
+            report.add(OFF, "PIXFARO_TOKEN", "not set; not needed, Google (GEMINI_API_KEY) makes the images")
         else:
             report.add(OFF, "PIXFARO_TOKEN", "not set; image skills draft a prompt for you to run yourself")
         return
@@ -275,6 +277,63 @@ def check_pixfaro(report: Report, offline: bool) -> None:
         report.add(WARN, "  live check", f"could not reach Pixfaro ({type(exc).__name__}); token itself may still be fine")
 
 
+def check_gemini(report: Report, offline: bool) -> None:
+    """Google AI Studio key: the image backend that wins when set."""
+    token = (os.getenv("GEMINI_API_KEY") or "").strip()
+    if not token:
+        from lib._env import find_unloaded_token_file
+
+        unloaded = find_unloaded_token_file(("GEMINI_API_KEY",))
+        if unloaded:
+            report.add(BAD, "GEMINI_API_KEY", f"defined in {unloaded} but NOT loaded - install python-dotenv (pip install python-dotenv) or run from the linkedin-skills folder")
+        else:
+            report.add(OFF, "GEMINI_API_KEY", "not set; images fall back to Pixfaro if configured, else a drafted prompt")
+        return
+
+    report.add(OK, "GEMINI_API_KEY", mask(token))
+    from lib.brand_compose import brand
+
+    b = brand()
+    if os.getenv("BRAND_LOGO_PATH") and not b["logo_path"]:
+        report.add(BAD, "  BRAND_LOGO_PATH", f"{os.getenv('BRAND_LOGO_PATH')} does not exist; overlays fall back to the handle")
+    else:
+        report.add(OK if b["logo_path"] else OFF, "  brand logo", b["logo_path"] or "not set (BRAND_LOGO_PATH); no logo on images")
+    try:
+        import PIL  # noqa: F401
+        report.add(OK, "  Pillow", "installed (logo overlay, typeset cards)")
+    except ImportError:
+        report.add(BAD, "  Pillow", "missing - pip install Pillow (needed for overlays and cards)")
+    from lib.text_check import available
+
+    report.add(OK if available() else WARN, "  OCR text check",
+               "installed" if available() else "missing - pip install rapidocr-onnxruntime; AI-drawn text then falls back to typeset text")
+    if offline:
+        return
+
+    try:
+        import requests
+
+        # GET /models is free and proves the key. It does not prove billing:
+        # image models have no free tier, and only a generation shows that.
+        r = requests.get(
+            "https://generativelanguage.googleapis.com/v1beta/models",
+            headers={"x-goog-api-key": token},
+            params={"pageSize": 1000},
+            timeout=30,
+        )
+        if r.status_code == 200:
+            names = [m["name"].split("/", 1)[-1] for m in r.json().get("models", [])]
+            images = [n for n in names if "image" in n or "banana" in n]
+            report.add(OK, "  live check", f"key accepted; {len(images)} image models (e.g. {', '.join(images[:3])})")
+            report.add(OFF, "  billing", "not checkable for free: image models need billing linked in AI Studio")
+        elif r.status_code in (400, 401, 403):
+            report.add(BAD, "  live check", f"HTTP {r.status_code}: key rejected - copy it again from aistudio.google.com/api-keys")
+        else:
+            report.add(BAD, "  live check", f"unexpected HTTP {r.status_code}")
+    except Exception as exc:
+        report.add(WARN, "  live check", f"could not reach Google ({type(exc).__name__}); key itself may still be fine")
+
+
 # --- effective behaviour --------------------------------------------------
 
 
@@ -302,14 +361,15 @@ def check_backends(report: Report) -> None:
     report.add(
         OK,
         "image backend",
-        "pixfaro (auto-generate)" if images == "pixfaro" else "manual (prompt drafted for you)",
+        {"google": "google (Gemini generates; logo and typeset text added locally)",
+         "pixfaro": "pixfaro (auto-generate)"}.get(images, "manual (prompt drafted for you)"),
     )
 
     # This script reads environment variables. A Publora or Pixfaro connector
     # attached in claude.ai lives in the agent's runtime, not in the shell, so
     # it is invisible here - and saying "manual" flatly is then wrong in a way
     # that reads as a broken setup: the user has just watched a post go out.
-    if (publish == "manual" or images != "pixfaro") and os.getenv("CLAUDECODE"):
+    if (publish == "manual" or images == "manual") and os.getenv("CLAUDECODE"):
         report.add(
             OFF,
             "  connectors",
@@ -350,6 +410,7 @@ def main() -> int:
         lambda: check_apify(report, args.offline),
         lambda: check_publora(report, args.offline),
         lambda: check_pixfaro(report, args.offline),
+        lambda: check_gemini(report, args.offline),
     )
     run("Effective behaviour", lambda: check_backends(report))
 

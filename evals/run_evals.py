@@ -115,7 +115,7 @@ def case_hook_formula():
     """hook-extractor claims it returns which of the 20 canonical formulas a
     post used. The answer must be one that exists."""
     defined = set(re.findall(r"^## (F\d+) ",
-                             (ROOT / "references" / "hook-formulas.md").read_text(), re.M))
+                             (ROOT / "references" / "hook-formulas.md").read_text(encoding="utf-8"), re.M))
     post = ("I deleted our $40k/yr analytics stack on a Tuesday.\n\n"
             "Three weeks later nobody on the team had noticed.\n\n"
             "Here is what we replaced it with, and the one thing that actually broke.")

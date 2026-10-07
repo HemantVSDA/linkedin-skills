@@ -1,2 +1,6 @@
 requests>=2.31.0
 python-dotenv>=1.2.3
+# Google image backend: logo overlay and typeset cards, then the OCR check
+# that verifies model-drawn text. Manual and Pixfaro tiers run without them.
+Pillow>=10.0
+rapidocr-onnxruntime>=1.3

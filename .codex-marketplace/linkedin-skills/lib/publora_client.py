@@ -10,6 +10,8 @@ Wraps the Publora API endpoints. Verified against the live API 2026-09-15:
 - DELETE /linkedin-comments      (remove a comment we posted)
 - POST   /linkedin-reactions     (react to a post or comment)
 - POST   /linkedin-reshare       (reshare/repost a post, optional commentary)
+- POST   /get-upload-url         (presigned S3 URL for a local image; then PUT it)
+- PUT    /update-post/<id>       (draft -> scheduled once media is uploaded)
 
 The read and cancel endpoints are recent. This docstring claimed for months that
 they did not exist, which is why nothing in the bundle used them.
@@ -278,6 +280,68 @@ class PubloraClient:
             f"{self.BASE_URL}/delete-post/{post_group_id}",
             timeout=self.timeout,
         )
+        return self._handle(r)
+
+    # ---- Media upload (local files) ----------------------------------------
+
+    _IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                    ".webp": "image/webp", ".gif": "image/gif"}
+
+    def get_upload_url(self, *, file_name: str, content_type: str, post_group_id: str,
+                       media_type: str = "image") -> dict[str, Any]:
+        """POST /get-upload-url: a presigned S3 URL for one file of a post group.
+
+        Returns {uploadUrl, fileUrl, mediaId}. The media attaches to the post
+        group named here; there is no separate attach call.
+        """
+        return self._post("/get-upload-url", {
+            "fileName": file_name,
+            "contentType": content_type,
+            "type": media_type,
+            "postGroupId": post_group_id,
+        })
+
+    def upload_file(self, *, path: str, post_group_id: str) -> dict[str, Any]:
+        """Upload one local image to a (draft) post group. Returns the
+        get-upload-url payload ({fileUrl, mediaId, ...})."""
+        import mimetypes
+        from pathlib import Path
+
+        p = Path(path)
+        ctype = self._IMAGE_TYPES.get(p.suffix.lower()) or mimetypes.guess_type(p.name)[0]
+        if not ctype or not ctype.startswith("image/"):
+            raise PubloraError(f"not an image file: {p.name}")
+        slot = self.get_upload_url(file_name=p.name, content_type=ctype, post_group_id=post_group_id)
+        # The presigned PUT goes straight to S3: no Publora key, and the
+        # Content-Type must match the one the URL was signed for.
+        r = requests.put(slot["uploadUrl"], data=p.read_bytes(),
+                         headers={"Content-Type": ctype}, timeout=max(self.timeout, 120))
+        if r.status_code >= 400:
+            raise PubloraError(f"HTTP {r.status_code}: upload of {p.name} failed: {r.text[:200]}")
+        return slot
+
+    def update_post(self, *, post_group_id: str, **fields: Any) -> dict[str, Any]:
+        """PUT /update-post/<id>. Fields use Publora's names: status ("draft" |
+        "scheduled"), scheduledTime (ISO 8601 UTC), content, platforms,
+        mediaUrls, firstComment, platformSettings. `status="scheduled"` with no
+        time means now.
+
+        Publora answers 503 + Retry-After while freshly uploaded media is still
+        being validated, so that case waits and retries (up to ~1 minute).
+        """
+        body = {k: v for k, v in fields.items() if v is not None}
+        if not body:
+            raise PubloraError("update_post needs at least one field")
+        url = f"{self.BASE_URL}/update-post/{post_group_id}"
+        for attempt in range(8):
+            r = self._session.put(url, json=body, timeout=self.timeout)
+            if r.status_code != 503 or attempt == 7:
+                return self._handle(r)
+            try:
+                wait = float(r.headers.get("Retry-After", 5))
+            except ValueError:
+                wait = 5.0
+            time.sleep(min(max(wait, 1.0), 15.0))
         return self._handle(r)
 
     # ---- Reshare (repost) -------------------------------------------------

@@ -277,6 +277,10 @@ def publish(
             if kind == "reshare"
             else manual_mode_message(draft_text, target_url, kind=kind)
         )
+        _, local_media = _split_media(kwargs.get("media_urls"))
+        if local_media:
+            files = "\n".join(f"- `{p}`" for p in local_media)
+            message += f"\n**Attach these images in the LinkedIn composer:**\n{files}\n"
         return {"mode": "manual", "message": message}
 
     if backend == "publora":
@@ -321,12 +325,28 @@ def publish(
         if kind == "post":
             # Publora /create-post wants a list of platform ID strings, not dicts.
             platforms = kwargs.get("platforms") or [platform_id]
-            return client.create_post(
-                content=draft_text,
-                platforms=platforms,
-                scheduled_time=kwargs.get("scheduled_time"),
-                media_urls=kwargs.get("media_urls"),
-            )
+            remote, local = _split_media(kwargs.get("media_urls"))
+            if not local:
+                return client.create_post(
+                    content=draft_text,
+                    platforms=platforms,
+                    scheduled_time=kwargs.get("scheduled_time"),
+                    media_urls=remote or None,
+                )
+            # Local files (Google-generated images, typeset cards) have no URL.
+            # Publora's upload flow: create a draft, upload each file into it,
+            # then schedule it if a time was given (otherwise it stays a draft,
+            # exactly as a create_post without scheduled_time does).
+            created = client.create_post(content=draft_text, platforms=platforms,
+                                         media_urls=remote or None)
+            group = created.get("postGroupId") or (created.get("postGroup") or {}).get("_id")
+            if not group:
+                raise RuntimeError(f"Publora returned no postGroupId: {created}")
+            created["uploaded"] = [client.upload_file(path=p, post_group_id=group) for p in local]
+            if kwargs.get("scheduled_time"):
+                created["scheduled"] = client.update_post(
+                    post_group_id=group, status="scheduled", scheduledTime=kwargs["scheduled_time"])
+            return created
 
         if kind == "reshare":
             # `parent` is the original post's share/ugcPost URN; callers may pass
@@ -463,7 +483,7 @@ PREMIUM_MODELS = {"gemini-pro-image", "gpt-5-image"}
 
 # kind -> aspect_ratio (w:h). Callers can override with aspect_ratio=.
 ILLUSTRATION_ASPECTS = {
-    "post": "1:1",         # generic square feed image
+    "post": "4:5",         # feed image: portrait leads single-image engagement (AuthoredUp 2026)
     "square": "1:1",
     "portrait": "4:5",     # LinkedIn/IG feed portrait
     "carousel": "4:5",     # carousel/document slide
@@ -477,11 +497,87 @@ ILLUSTRATION_ASPECTS = {
 }
 
 
-def image_backend() -> Literal["pixfaro", "manual"]:
-    """`pixfaro` when PIXFARO_TOKEN (or PIXFARO_API_KEY) is set, else `manual`."""
+def image_backend() -> Literal["google", "pixfaro", "manual"]:
+    """`google` when GEMINI_API_KEY is set, else `pixfaro` when PIXFARO_TOKEN
+    (or PIXFARO_API_KEY) is set, else `manual`.
+
+    Google wins when both are set: images come straight from Google's models
+    (the ones Pixfaro resold), and the brand layer runs locally.
+    """
+    if os.getenv("GEMINI_API_KEY"):
+        return "google"
     if os.getenv("PIXFARO_TOKEN") or os.getenv("PIXFARO_API_KEY"):
         return "pixfaro"
     return "manual"
+
+
+def _split_media(media) -> tuple[list[str], list[str]]:
+    """Split media entries into (remote URLs, local file paths)."""
+    remote, local = [], []
+    for m in media or []:
+        s = str(m)
+        if s.startswith(("http://", "https://")):
+            remote.append(s)
+        elif os.path.isfile(s):
+            local.append(s)
+        else:
+            raise ValueError(f"media entry is neither a URL nor an existing file: {s!r}")
+    return remote, local
+
+
+_GEMINI_CLIENT = None
+_GEMINI_CLIENT_KEY = None
+
+
+def _gemini_client():
+    """One GeminiImageClient per key, so its cache and session persist (same
+    reasoning as `_pixfaro_client`)."""
+    global _GEMINI_CLIENT, _GEMINI_CLIENT_KEY
+    token = os.getenv("GEMINI_API_KEY")
+    if _GEMINI_CLIENT is None or _GEMINI_CLIENT_KEY != token:
+        from .gemini_client import GeminiImageClient
+
+        _GEMINI_CLIENT = GeminiImageClient()
+        _GEMINI_CLIENT_KEY = token
+    return _GEMINI_CLIENT
+
+
+def _google_overlay(path: str, overlay: Any) -> str:
+    """Apply the brand overlay locally. Pixfaro-shaped overlays are accepted:
+    "default" or a dict with logo_id/logo_path -> the brand logo; {"text": ...}
+    -> a text stamp. `overlay=False` skips it."""
+    if overlay is False:
+        return path
+    from . import brand_compose as bc
+
+    if overlay in (None, "default", True):
+        if not bc.brand()["logo_path"] and not bc.brand()["handle"]:
+            return path
+        return bc.overlay(path)
+    if isinstance(overlay, dict):
+        pos = overlay.get("position", "bottom-right")
+        if overlay.get("text") and not overlay.get("logo_path"):
+            return bc.overlay(path, text=overlay["text"], position=pos, color=overlay.get("color"))
+        return bc.overlay(path, logo_path=overlay.get("logo_path"), position=pos)
+    return path
+
+
+def _google_result(gen: dict, final_path: str, **extra: Any) -> dict[str, Any]:
+    from .gemini_client import PREMIUM_MODELS
+
+    out = {
+        "backend": "google",
+        "url": final_path,          # a local file: publish() uploads it via Publora
+        "path": final_path,
+        "id": gen.get("id"),        # the clean, un-stamped image: pass to refine()
+        "cost": gen.get("cost"),
+        "model": gen.get("model"),
+        "balance_after": None,      # Google exposes no balance; see AI Studio -> Spend
+        "low_balance": False,
+        "premium": gen.get("model") in PREMIUM_MODELS,
+    }
+    out.update(extra)
+    return out
 
 
 def _unloaded_token_note() -> str:
@@ -621,6 +717,19 @@ def illustrate(
     if image_backend() == "manual":
         return {"backend": "manual", "message": manual_illustration_message(prompt, ar)}
 
+    if image_backend() == "google":
+        from .gemini_client import DEFAULT_MODEL
+
+        gen = _gemini_client().generate(
+            prompt,
+            model=model or DEFAULT_MODEL,
+            aspect_ratio=ar,
+            image_size=resolution,
+            reference_images=kwargs.get("reference_images"),
+            force_refresh=kwargs.get("force_refresh", False),
+        )
+        return _google_result(gen, _google_overlay(gen["path"], overlay))
+
     client = _pixfaro_client()
     used_model = model or "nano-banana-2"
     data = client.generate(
@@ -682,6 +791,19 @@ def refine(
     if image_backend() == "manual":
         return {"backend": "manual", "message": manual_edit_message(instruction)}
 
+    if image_backend() == "google":
+        from .gemini_client import DEFAULT_MODEL
+
+        gen = _gemini_client().edit(
+            image_id,
+            instruction,
+            model=model or DEFAULT_MODEL,
+            aspect_ratio=aspect_ratio,
+            image_size=resolution or "1K",
+            force_refresh=kwargs.get("force_refresh", False),
+        )
+        return _google_result(gen, _google_overlay(gen["path"], overlay))
+
     client = _pixfaro_client()
     used_model = model or "nano-banana-2"
     data = client.edit(
@@ -707,6 +829,15 @@ def available_models() -> Optional[list[dict[str, Any]]]:
     """
     if image_backend() == "manual":
         return None
+    if image_backend() == "google":
+        from .gemini_client import PRICES, PREMIUM_MODELS
+
+        out = []
+        for m in _gemini_client().list_models():
+            mid = m["name"].split("/", 1)[-1]
+            out.append({"id": mid, "display_name": m.get("displayName"),
+                        "price_per_image": PRICES.get(mid), "premium": mid in PREMIUM_MODELS})
+        return out
     return _pixfaro_client().list_models()
 
 
@@ -764,6 +895,24 @@ def card(
     if image_backend() == "manual":
         return {"backend": "manual", "message": manual_card_message(template, slots, size or "1:1")}
 
+    if image_backend() == "google":
+        # Templates are typeset locally (lib/brand_compose.py): free, exact text.
+        from . import brand_compose as bc
+
+        sz = size if size in bc.SIZES else "4:5"
+        if template == "quote-card":
+            path = bc.quote_card(slots["quote"], name=_slot(slots, "name"),
+                                 handle=_slot(slots, "handle"), size=sz)
+        elif template in ("text-card", "post-card"):
+            path = bc.text_card(slots.get("headline") or slots.get("title") or "",
+                                slots.get("items") or (), background=slots.get("background"),
+                                subhead=slots.get("subhead"), footer=slots.get("footer"), size=sz)
+        else:
+            raise ValueError(f"unknown template {template!r}; local templates: quote-card, text-card")
+        return {"backend": "google", "url": path, "path": path, "id": None, "cost": 0.0,
+                "model": f"local:{template}", "balance_after": None, "low_balance": False,
+                "premium": False}
+
     client = _pixfaro_client()
     data = client.render(
         template,
@@ -783,7 +932,7 @@ def quote_card(
     name: Optional[str] = None,
     handle: Optional[str] = None,
     avatar: Optional[str] = None,
-    size: str = "1:1",
+    size: str = "4:5",
     style: Optional[Any] = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
@@ -812,6 +961,14 @@ def available_templates() -> Optional[list[dict[str, Any]]]:
     manual mode / on error. The catalog endpoint is public and free."""
     if image_backend() == "manual":
         return None
+    if image_backend() == "google":
+        return [
+            {"id": "quote-card", "slots": ["quote", "name", "handle"], "sizes": ["4:5", "1:1", "16:9"],
+             "price": 0.0, "best_for": "the hook line as a typeset card"},
+            {"id": "text-card", "slots": ["headline", "items (<=7)", "background", "subhead", "footer"],
+             "sizes": ["4:5", "1:1", "16:9"], "price": 0.0,
+             "best_for": "checklists, frameworks, comparisons: exact text over an optional picture"},
+        ]
     try:
         return _pixfaro_client().list_templates()
     except Exception:
@@ -840,6 +997,17 @@ def brand_logo(path: str, *, name: Optional[str] = None) -> dict[str, Any]:
             ),
         }
 
+    if image_backend() == "google":
+        # Nothing to upload: the logo is stamped locally from the file itself.
+        return {
+            "backend": "google",
+            "message": (
+                f"No upload needed with the Google backend. Put BRAND_LOGO_PATH={path} in "
+                ".env (a transparent PNG; a relative path resolves from the linkedin-skills "
+                "folder) and every overlay stamps it."
+            ),
+        }
+
     from .pixfaro_client import PixfaroError
 
     client = _pixfaro_client()
@@ -859,6 +1027,164 @@ def brand_logo(path: str, *, name: Optional[str] = None) -> dict[str, Any]:
             }
         raise
     return {"backend": "pixfaro", "logo": logo}
+
+
+def _slot(slots: dict[str, Any], name: str) -> Optional[str]:
+    """Template slot value; "default" pulls the brand handle (Pixfaro's convention)."""
+    v = slots.get(name)
+    if v == "default":
+        from . import brand_compose as bc
+
+        return bc.brand()["handle"] if name == "handle" else None
+    return v
+
+
+# ─────────────────────────────────────────────────────────────────
+# TEXT ON IMAGES — three routes (Google backend).
+#   A. designed():  Gemini draws the whole graphic, text included; an OCR
+#                   check verifies every planned string, a targeted edit fixes
+#                   a miss, and anything still wrong falls back to route B.
+#   B. text_card(): Gemini draws a wordless picture; the text is typeset.
+#   C. quote_card()/text_card(background=None): typeset only, $0.
+# Text is always planned first, word for word, before any image is made.
+# ─────────────────────────────────────────────────────────────────
+
+#: Route A only for short text: past these limits model-drawn text degrades
+#: (headline ~100%, <15 words ~95%, 30+ words ~60% in independent testing).
+DESIGNED_LIMITS = {"headline_words": 12, "item_words": 8, "items": 6, "total_words": 45}
+
+
+def _words(s: str) -> int:
+    return len(s.split())
+
+
+def _brand_style_line() -> str:
+    from . import brand_compose as bc
+
+    b = bc.brand()
+    return (f"Brand colours: primary {b['primary']}, accent {b['accent']}, "
+            f"background {b['background']}.")
+
+
+def text_card(
+    headline: str,
+    items: Any = (),
+    *,
+    scene: Optional[str] = None,
+    background: Optional[str] = None,
+    subhead: Optional[str] = None,
+    footer: Optional[str] = None,
+    size: str = "4:5",
+    model: Optional[str] = None,
+) -> dict[str, Any]:
+    """Route B/C: typeset exact text, optionally over a picture.
+
+    `scene` asks Gemini for a wordless illustration to sit behind the text
+    (route B, ~$0.034); `background` uses an existing image file instead; with
+    neither, it is a plain brand card (route C, $0). Every character is typed.
+    """
+    if image_backend() == "manual":
+        return {"backend": "manual", "message": manual_card_message(
+            "text-card", {"headline": headline, "items": list(items), "footer": footer or ""}, size)}
+    from . import brand_compose as bc
+    from .gemini_client import DEFAULT_MODEL, estimate_cost
+
+    cost, gen_id = 0.0, None
+    if scene and not background and image_backend() == "google":
+        prompt = (f"{scene.rstrip('.')}. A clean, wordless editorial illustration with no "
+                  f"letters, numbers or signage anywhere. {_brand_style_line()} "
+                  "Generous negative space, flat vector style, landscape-friendly composition.")
+        gen = _gemini_client().generate(prompt, model=model or DEFAULT_MODEL, aspect_ratio="4:3")
+        background, gen_id = gen["path"], gen["id"]
+        cost = gen["cost"] or estimate_cost(model or DEFAULT_MODEL) or 0.0
+    path = bc.text_card(headline, list(items), background=background, subhead=subhead,
+                        footer=footer, size=size)
+    return {"backend": "google", "route": "B" if background else "C", "url": path, "path": path,
+            "id": gen_id, "cost": cost, "model": (model or DEFAULT_MODEL) if gen_id else "local:text-card",
+            "balance_after": None, "low_balance": False, "premium": False,
+            "text_check": {"ok": True, "method": "typeset (exact by construction)"}}
+
+
+def designed(
+    headline: str,
+    items: Any = (),
+    *,
+    style: str = "",
+    footer: Optional[str] = None,
+    kind: str = "portrait",
+    model: Optional[str] = None,
+    max_fixes: int = 2,
+    fallback_scene: Optional[str] = None,
+    overlay: Any = "default",
+) -> dict[str, Any]:
+    """Route A: a fully AI-designed graphic whose text is OCR-verified.
+
+    1. Gemini draws the graphic with exactly the planned text.
+    2. `lib.text_check.verify` reads it back with a local OCR engine; numbers,
+       %, $, dates and form codes must match character for character.
+    3. A miss gets a targeted edit ("correct X, keep everything else"), at most
+       `max_fixes` times.
+    4. Still wrong -> route B (`text_card`): a wordless picture plus typeset
+       text. A wrong figure never reaches the approval card.
+    Text over the DESIGNED_LIMITS goes straight to route B.
+
+    Returns the usual image dict plus `route` ("A" or "B"), `attempts`, and
+    `text_check` (the OCR report: show it in the approval card).
+    """
+    items = list(items)
+    expected = [headline, *items] + ([footer] if footer else [])
+    lim = DESIGNED_LIMITS
+    too_long = (_words(headline) > lim["headline_words"] or len(items) > lim["items"]
+                or any(_words(i) > lim["item_words"] for i in items)
+                or sum(_words(t) for t in expected) > lim["total_words"])
+    scene = fallback_scene or style or "A calm, professional editorial illustration that fits the topic"
+
+    if image_backend() != "google":
+        return text_card(headline, items, footer=footer)
+    if too_long:
+        out = text_card(headline, items, scene=scene, footer=footer, model=model)
+        out["route_reason"] = "text over the route-A limits; typeset instead"
+        return out
+
+    from . import text_check
+    from .gemini_client import DEFAULT_MODEL
+
+    if not text_check.available():
+        out = text_card(headline, items, scene=scene, footer=footer, model=model)
+        out["route_reason"] = "OCR engine not installed (pip install rapidocr-onnxruntime); typeset instead"
+        return out
+
+    used = model or DEFAULT_MODEL
+    listing = "\n".join(f"{n}. \"{t}\"" for n, t in enumerate(items, 1))
+    prompt = (
+        f"Design a clean, professional LinkedIn graphic in {ILLUSTRATION_ASPECTS.get(kind, '4:5')} "
+        f"format. {style.strip()} {_brand_style_line()}\n"
+        f"Render exactly this text, spelled exactly as written, and no other words or numbers:\n"
+        f"Headline: \"{headline}\"\n"
+        + (f"Items, as a clear list:\n{listing}\n" if items else "")
+        + (f"Small footer line: \"{footer}\"\n" if footer else "")
+        + "Typography: bold modern sans-serif, strong hierarchy (large headline, medium items), "
+          "high contrast, generous spacing. Keep the bottom-right corner clear for a logo."
+    )
+    client = _gemini_client()
+    gen = client.generate(prompt, model=used, aspect_ratio=ILLUSTRATION_ASPECTS.get(kind, "4:5"))
+    cost = gen["cost"] or 0.0
+    report = text_check.verify(gen["path"], expected)
+    attempts = 1
+    while not report["ok"] and attempts <= max_fixes:
+        gen = client.edit(gen["id"], text_check.fix_instruction(report), model=used)
+        cost += gen["cost"] or 0.0
+        report = text_check.verify(gen["path"], expected)
+        attempts += 1
+    if report["ok"]:
+        return _google_result(gen, _google_overlay(gen["path"], overlay), route="A",
+                              attempts=attempts, cost=round(cost, 4), text_check=report)
+
+    out = text_card(headline, items, scene=scene, footer=footer, model=model)
+    out.update(cost=round(cost + (out.get("cost") or 0.0), 4), attempts=attempts,
+               route_reason="model-drawn text failed the OCR check; typeset instead",
+               failed_text_check=report)
+    return out
 
 
 if __name__ == "__main__":
