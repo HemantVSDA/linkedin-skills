@@ -16,12 +16,11 @@ AccountIF logo and colours, and publishes to LinkedIn **only after you approve**
 | **Claude Desktop** with a paid plan (Pro, Max, Team or Enterprise) | [claude.ai/download](https://claude.ai/download) |
 | **Python 3.12** | [python.org/downloads](https://www.python.org/downloads/). On the first install screen, **tick "Add python.exe to PATH"** |
 | **Git** | [git-scm.com/download/win](https://git-scm.com/download/win). Click Next through the defaults |
-| **The private AccountIF pack** (3 files) | Ask your admin. It is shared privately, never on GitHub |
+| **Your `.env` file** (keys) | Ask your admin. It is shared privately, never on GitHub |
 
-The private pack holds:
-- `.env`: your keys (see Step 3)
-- `voice-profile.md`: how AccountIF writes
-- `story-bank.md`: AccountIF's facts, figures and naming rules
+The AccountIF voice profile (how AccountIF writes) and Story Bank (facts,
+figures, naming rules) come with the download, in the `references` folder.
+Only the keys are shared separately.
 
 ---
 
@@ -40,13 +39,10 @@ python -m pip install -r requirements.txt
 You now have a folder **`linkedin-skills`** on your Desktop. The last line
 takes a minute or two.
 
-## Step 2: Add the private AccountIF files
+## Step 2: Add your `.env` file
 
-From the private pack:
-
-1. Put **`.env`** directly inside `Desktop\linkedin-skills\`
-2. Put **`voice-profile.md`** and **`story-bank.md`** inside
-   `Desktop\linkedin-skills\references\` and choose **Replace** when Windows asks.
+Put the **`.env`** file your admin gave you directly inside
+`Desktop\linkedin-skills\` (next to `README.md`).
 
 If you don't see `.env` after copying: in File Explorer, click **View → Show →
 File name extensions** and **Hidden items**. The file is named exactly `.env`
@@ -128,7 +124,8 @@ Run git pull, then reinstall the linkedin-skills plugin from this folder
 (/plugin marketplace update linkedin-skills and /plugin update linkedin-skills@linkedin-skills).
 ```
 
-Your `.env`, `voice-profile.md` and `story-bank.md` are never overwritten.
+Your `.env` is never overwritten. The voice profile and Story Bank update with
+the rest, so everyone writes from the same facts.
 
 ## House rules (already built in)
 

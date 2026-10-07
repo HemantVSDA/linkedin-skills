@@ -49,6 +49,9 @@ TEXT_SUFFIXES = {".md", ".py", ".json", ".yml", ".yaml", ".txt", ".sh", ".toml",
 #: patterns above are blind to it.
 PERSONAL_TEMPLATES = re.compile(r"(?:^|/)(voice-profile|story-bank)\.md$")
 FILLED_MARKER = re.compile(r"^\s*[-*]?\s*filled:\s*yes\b", re.M | re.I)
+#: A filled file the owner chose to publish (a team repo) says so explicitly.
+#: Without this line a filled file is still treated as an accident.
+SHARED_MARKER = re.compile(r"^\s*[-*]?\s*shared:\s*yes\b", re.M | re.I)
 
 
 def tracked_files() -> list[str]:
@@ -80,7 +83,7 @@ def main() -> int:
                 head = path.read_text(encoding="utf-8")[:4000]
             except (UnicodeDecodeError, OSError):
                 head = ""
-            if FILLED_MARKER.search(head):
+            if FILLED_MARKER.search(head) and not SHARED_MARKER.search(head):
                 problems.append(
                     f"{rel}: this template is marked `filled: yes` and is tracked. "
                     f"It holds your own material, not a credential, so nothing else "

@@ -40,9 +40,11 @@ otherwise.
   his history stays intact. Upstream PRs, if any, follow his rule:
   `--author="Sergey Bulaev <s@bulaev.org>"`. Verify with
   `git log -1 --format='%an <%ae>'` before pushing.
-- Never commit `.env`, `testing/`, `output/`, or a filled
-  `references/voice-profile.md` / `references/story-bank.md`: the AccountIF
-  versions are shared privately (see SETUP-TEAM.md).
+- Never commit `.env`, `testing/` or `output/`. The filled AccountIF
+  `references/voice-profile.md` and `references/story-bank.md` ARE committed on
+  purpose (owner decision 2026-10-07, public repo); each carries `shared: yes`,
+  which the secret scan and tests honour. Any other filled profile is still an
+  accident. The Codex package keeps the blank templates.
 - Co-author trailer (`Co-Authored-By: Claude ...`) is fine and welcomed.
 - Verify locally before push: build never breaks, no broken refs in
   `SKILL.md`, library smoke import passes.

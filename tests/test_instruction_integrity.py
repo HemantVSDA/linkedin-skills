@@ -337,9 +337,15 @@ class PersonalTemplates(unittest.TestCase):
     TEMPLATES = ("references/voice-profile.md", "references/story-bank.md")
     BLANK = re.compile(r"^\s*[-*]?\s*filled:\s*no\b", re.M | re.I)
 
+    SHARED = re.compile(r"^\s*[-*]?\s*shared:\s*yes\b", re.M | re.I)
+
     def test_the_shipped_templates_are_blank(self):
+        """Blank, unless the file says `shared: yes`: a team repo publishing its
+        own profile on purpose (the AccountIF edition does)."""
         for name in self.TEMPLATES:
             text = (ROOT / name).read_text(encoding="utf-8")
+            if self.SHARED.search(text):
+                continue
             self.assertRegex(text, self.BLANK, f"{name} is tracked with content in it")
 
     def test_the_package_copies_are_blank_too(self):
